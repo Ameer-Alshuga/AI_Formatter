@@ -3,81 +3,115 @@ import docx
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_DIRECTION
+from docx.oxml.ns import nsdecls
+from docx.oxml import parse_xml
 
 def handle_paragraph(tag, doc):
     """
-    يعالج الفقرات (p) ويدعم النصوص العريضة والمائلة داخلها.
+    Handles paragraph tags (<p>) and supports bold and italic text within them.
     """
     p = doc.add_paragraph()
     
-    # التحقق من اتجاه النص (للعربية)
+    # Check for right-to-left text direction (for Arabic)
     if tag.get('dir') == 'rtl':
         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     
-    # المرور على كل جزء داخل الفقرة (نص عادي، أو وسوم أخرى مثل strong, em)
+    # Iterate over each child element within the paragraph tag
     for child in tag.children:
         if child.name == 'strong' or child.name == 'b':
             p.add_run(child.get_text()).bold = True
         elif child.name == 'em' or child.name == 'i':
             p.add_run(child.get_text()).italic = True
         else:
-            # هذا للتعامل مع النصوص العادية
+            # This handles plain text nodes
             p.add_run(str(child))
 
 
 def handle_table(tag, doc):
     """
-    يعالج الجداول ويحولها إلى جدول في مستند Word مع دعم اتجاه اليمين لليسار.
+    Processes HTML tables and converts them to Word tables, with RTL support.
     """
     rows_data = []
-    # استخراج كل الصفوف من الجدول
+    # Extract all rows from the table
     for row in tag.find_all('tr'):
         cols_data = []
-        # استخراج كل الخلايا (th أو td) من كل صف
+        # Extract all cells (th or td) from each row
         for cell in row.find_all(['th', 'td']):
             cols_data.append(cell.get_text(strip=True))
         rows_data.append(cols_data)
 
     if not rows_data:
-        return # لا تقم بإنشاء جدول فارغ
+        return # Don't create an empty table
 
-    # إنشاء جدول في الوورد بعدد الصفوف والأعمدة المناسب
+    # Create a table in Word with the appropriate number of rows and columns
     num_rows = len(rows_data)
-    num_cols = len(rows_data) if num_rows > 0 else 0
+    num_cols = len(rows_data[0]) if num_rows > 0 else 0
     table = doc.add_table(rows=num_rows, cols=num_cols)
-    table.style = 'Table Grid' # تطبيق نمط أساسي للجدول
+    table.style = 'Table Grid' # Apply a basic table style
 
-    # التحقق من اتجاه الجدول (للعربية)
+    # Check for table direction (for Arabic)
     if tag.get('dir') == 'rtl':
         table.direction = WD_TABLE_DIRECTION.RTL
 
-    # تعبئة خلايا الجدول بالبيانات
+    # Populate the table cells with data
     for i, row_data in enumerate(rows_data):
+        row_cells = table.rows[i].cells
         for j, cell_text in enumerate(row_data):
-            table.cell(i, j).text = cell_text
-            # جعل الصف الأول (العناوين) عريضاً
+            row_cells[j].text = cell_text
+            # Make the first row (headers) bold
             if i == 0:
-                table.cell(i, j).paragraphs.runs.font.bold = True
+                for paragraph in row_cells[j].paragraphs:
+                    for run in paragraph.runs:
+                        run.font.bold = True
     
-    # إضافة مسافة بعد الجدول لتحسين التنسيق
+    # Add a paragraph after the table for better spacing
+    doc.add_paragraph()
+
+
+def handle_code_block(tag, doc):
+    """
+    Handles code blocks by placing them in a single-cell table with a grey background.
+    """
+    code_text = tag.get_text()
+    
+    # Create a table with one row and one column
+    table = doc.add_table(rows=1, cols=1)
+    
+    # Get the single cell from the table
+    cell = table.cell(0, 0)
+    
+    # Add the code text to the cell
+    paragraph = cell.paragraphs[0]
+    run = paragraph.add_run(code_text)
+    
+    # Apply monospace font formatting
+    run.font.name = 'Courier New'
+    run.font.size = Pt(10)
+
+    # --- Section for cell background color ---
+    # This code modifies the cell's underlying XML to add a background color
+    shading_xml = parse_xml(r'<w:shd {} w:fill="F0F0F0"/>'.format(nsdecls('w'))) # F0F0F0 is light grey
+    cell._tc.get_or_add_tcPr().append(shading_xml)
+    
+    # Add a paragraph after the code block for spacing
     doc.add_paragraph()
 
 
 def convert_html_to_docx(html_path, docx_path):
     """
-    الوظيفة الرئيسية التي تقرأ ملف HTML وتحوله إلى DOCX.
+    The main function that reads an HTML file and converts it to a DOCX file.
     """
-    # إنشاء مستند وورد جديد
+    # Create a new Word document
     doc = docx.Document()
 
-    # قراءة محتوى ملف HTML
+    # Read the content of the HTML file
     with open(html_path, 'r', encoding='utf-8') as f:
         html_content = f.read()
 
-    # تحليل المحتوى باستخدام BeautifulSoup
+    # Parse the HTML content using BeautifulSoup
     soup = BeautifulSoup(html_content, 'lxml')
 
-    # المرور على كل الوسوم الرئيسية داخل جسم الـ HTML
+    # Iterate over all top-level tags within the HTML body
     for tag in soup.body.find_all(recursive=False):
         if tag.name == 'h1':
             p = doc.add_heading(tag.get_text(strip=True), level=1)
@@ -97,31 +131,18 @@ def convert_html_to_docx(html_path, docx_path):
                 doc.add_paragraph(li.get_text(strip=True), style='List Bullet')
         
         elif tag.name == 'pre':
-            code_text = tag.get_text()
-            p = doc.add_paragraph()
-            # تنسيق خاص للأكواد
-            p_format = p.paragraph_format
-            p_format.left_indent = Pt(20)
-            p_format.space_before = Pt(4)
-            p_format.space_after = Pt(4)
-            # إضافة خلفية رمادية (shading)
-            shading = p_format.shading
-            shading.background_color = RGBColor(240, 240, 240) # رمادي فاتح
-            
-            run = p.add_run(code_text)
-            # استخدام خط أحادي المسافة (monospace)
-            run.font.name = 'Courier New'
-            run.font.size = Pt(10)
+            # Call the new dedicated function for code blocks
+            handle_code_block(tag, doc)
 
         elif tag.name == 'table':
             handle_table(tag, doc)
 
-    # حفظ المستند النهائي
+    # Save the final document
     doc.save(docx_path)
-    print(f"تم تحويل الملف بنجاح! تم الحفظ في: {docx_path}")
+    print(f"File converted successfully! Saved to: {docx_path}")
 
 
-# نقطة بداية تشغيل السكربت
+# Script entry point
 if __name__ == '__main__':
     html_file = 'sample.html'
     docx_file = 'output.docx'
